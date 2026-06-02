@@ -1,0 +1,375 @@
+---
+title: "POLI176_FinalProject_V2"
+format: html
+editor: visual
+---
+
+## Libraries
+
+```{r}
+library(tidyverse)
+library(tokenizers)
+library(quanteda)
+library(quanteda.textplots)
+library(quanteda.textmodels)
+library(caret)
+# install.packages("devtools")
+library(devtools)
+# devtools::install_github("quanteda/quanteda.corpora")
+library(quanteda.corpora)
+# install.packages("irr")
+library(irr)
+library(glue)
+
+library(stm)
+library(seededlda)
+
+library(tm)
+library(SnowballC)
+
+library(glmnet)
+```
+
+## Pre-processing
+
+```{r}
+#Read the data into R
+setwd("C:/Users/ariel/Downloads/UCSD/FA 25/POLI 176")
+yelp <- read_csv("Project/yelp.csv")
+
+#create an ID for yelp so we can merge later
+yelp$id <- 1:nrow(yelp)
+yelp
+
+#Make text column into corpus
+corpus_yelp <- corpus(yelp, text_field = "text")
+corpus_yelp
+
+#Create a document feature matrix (dfm)
+#Some common pre-processing
+toks <- tokens(corpus_yelp, remove_punct = TRUE)
+toks <- tokens_wordstem(toks)
+toks <- tokens_select(toks,  stopwords("en"), selection = "remove")
+dfm <- dfm(toks)
+dfm <- dfm_trim(dfm, min_docfreq=.05, docfreq_type = "prop")
+```
+
+## Handcoding
+
+```{r}
+#First randomly select 100 snippets for hand coding to create training set
+
+#set.seed(8008135)
+#handcoding <- yelp[sample(1:nrow(yelp),100),]
+#write.csv(handcoding, "POLI176_Yelp_Handcoding.csv", row.names=F)
+```
+
+```{r}
+#Let's look at intercoder reliability}
+handcoding <- read.csv("POLI176_Yelp_Handcoding_v2.csv")
+#Confusion Matrix
+table(handcoding$Ariel, handcoding$Ella)
+#Krippendorff's alpha
+kripp.alpha(t(handcoding[,c("Ariel", "Ella")]))
+
+(handcoding[handcoding$Ariel!=handcoding$Ella,c("text", "Ariel", "Ella")])
+
+# check for your ownd data! do not do below 20ish%. rare category will make it too difficult down the line. try to choose a measure in which categories are not so rare
+mean(handcoding$Ariel)
+mean(handcoding$Ella)
+```
+
+## Merged Data
+
+```{r}
+handcoded <- read_csv("POLI176_Yelp_Handcoding_v2.csv")
+
+#Merge
+combined <- left_join(yelp, handcoded)
+
+#Any snippet with a code of negative as negative
+combined$negative <- ifelse(combined$Ariel==1 | combined$Ella==1, 1, 0)
+```
+
+## Exploratory Analysis
+
+```{r}
+yelp %>% 
+  ggplot(aes(x = stars)) +
+  geom_histogram(stat="count")
+
+yelp %>% 
+  ggplot(aes(x = useful)) +
+  geom_histogram(stat = "count")
+
+summary(yelp$useful)
+```
+
+## Sentiment Analysis
+
+```{r}
+#We'll use the lexicoder sentiment dictionary that's in quanteda
+head(data_dictionary_LSD2015)
+
+#Select only the "negative" and "negative" categories
+data_dictionary_LSD2015_pos_neg <- data_dictionary_LSD2015[1:2]
+
+#Categorize each word into negative or negative and count them per document
+# will get list "negative", "negative", "negative"..etc.
+toks_gov_dict <- tokens_lookup(toks, dictionary = data_dictionary_LSD2015_pos_neg)
+
+#Create a dfm of the result (2 total unique words: pos, neg)
+dfm_neg_pos <- dfm(toks_gov_dict)
+dfm_neg_pos
+
+#Create a score from this
+yelp$snippet_sent_score <- as.numeric(dfm_neg_pos[,"negative"]) - as.numeric(dfm_neg_pos[,"negative"])
+
+summary(yelp$snippet_sent_score)
+```
+
+```{r}
+#What are the most negative?
+glue('Most Positive: {yelp$text[yelp$snippet_sent_score > 45]}')
+
+#What are the most negative?
+glue('Most Negative: {yelp$text[yelp$snippet_sent_score< -20]}')
+```
+
+## Naive Bayes
+
+```{r}
+#Split into training, validation, and unlabeled data
+
+# add negative variable to dfm before subsetting
+docvars(dfm, "negative") <- combined$negative
+docvars(dfm, "id") <- combined$id
+
+#Unlabeled data is what we don't have a label for
+unlabeled <- which(is.na(combined$negative))
+
+#Labeled data is what we do have a label for
+labeled <- which(!is.na(combined$negative))
+
+#Now let's sample a training and validation set from the labeled data
+set.seed(8008135)
+training <- sample(labeled, round(length(labeled)*.75))
+validation <- labeled[!labeled%in%training]
+
+#Create separate dfm's for each
+dfmat_train <- dfm_subset(dfm, id %in% training)
+dfmat_val   <- dfm_subset(dfm, id %in% validation)
+
+#Naive Bayes
+#Train
+tmod_nb <- textmodel_nb(dfmat_train, docvars(dfmat_train, "negative"))
+summary(tmod_nb)
+
+#Probability of negative given a category
+coef_nb <- coef(tmod_nb)
+head(coef_nb)
+
+#top 30 tokens predicting class 1 (negative)
+head(sort(coef_nb[,"1"], decreasing = TRUE), 30)
+#top 30 tokens predicting class 0 (positive)
+head(sort(coef_nb[,"0"], decreasing = TRUE), 30)
+```
+
+```{r}
+#How well does it do in sample?
+predict.train <- predict(tmod_nb, dfmat_train)
+
+tab_train <- table(docvars(dfmat_train, "negative"), predict.train)
+tab_train
+
+# In sample
+#precision
+diag(tab_train)/colSums(tab_train)
+#recall
+diag(tab_train)/rowSums(tab_train)
+```
+
+```{r}
+#How well does this prediction do out of sample?  Validation
+predict.val <- predict(tmod_nb, newdata = dfmat_val)
+
+tab_val <- table(docvars(dfmat_val, "negative"), predict.val)
+tab_val
+
+#Confusion matrix
+conf_matrix <- confusionMatrix(factor(predict.val), 
+                               factor(docvars(dfmat_val, "negative")),
+                               mode="prec_recall", positive="1")
+print(conf_matrix)
+```
+
+## Lasso
+
+```{r}
+lasso.1 <- glmnet(dfmat_train, 
+                  docvars(dfmat_train, "negative"),
+                  family="binomial", 
+                  alpha=1)
+
+#Let's look at it's performance out of sample
+predict.test <- predict(lasso.1, dfmat_val, type="response")
+
+lambda = 60
+prob <- predict.test[, lambda]
+
+predict.class <- ifelse(prob >= 0.5, "1", "0")
+
+#Convert truth labels to factor with matching levels
+truth <- factor(docvars(dfmat_val, "negative"), levels = c("0","1"))
+pred  <- factor(predict.class, levels = c("0","1"))
+
+#weaker lambda and regularization
+table(truth, pred)
+```
+
+```{r}
+#Confusion matrix for "simple" lasso
+conf_matrix <- confusionMatrix(factor(predict.class), 
+                               factor(docvars(dfmat_val, "negative")),
+                               mode="prec_recall", positive="1")
+print(conf_matrix)
+```
+
+```{r}
+# 10 fold cross-validation and finds the best lambda
+
+#Cross-validation with Lasso
+cv <- cv.glmnet(dfmat_train, docvars(dfmat_train, "negative"),
+                family="binomial", alpha=1, type.measure = "class")
+
+#Plot CV error
+plot(log(cv$lambda), cv$cvm, xlab="Log Lambda", ylab="Misclassification error")
+
+#### Converting continous float pred to dummy/binary pred
+# 1. Get predicted probabilities
+predict.prob <- predict(cv, dfmat_val,
+                        type = "response",
+                        s = "lambda.min")
+
+# 2. Convert probabilities to class labels (threshold = 0.5)
+predict.class <- ifelse(predict.prob >= 0.5, 1, 0)
+
+# 3. Convert truth labels to factor with matching levels
+truth <- factor(docvars(dfmat_val, "negative"), levels = c(0,1))
+pred  <- factor(predict.class, levels = c(0,1))
+
+#matrix
+tab_val <- table(truth, pred)
+tab_val
+
+#Confusion matrix for "simple" lasso
+conf_matrix <- confusionMatrix(pred, truth,
+                               mode="prec_recall", positive="1")
+print(conf_matrix)
+```
+
+### Up-Weighting Negative Observations
+
+```{r}
+#Try upweighting negative observations
+#inverse frequency weighting
+# Count class frequencies
+n_total <- nrow(dfmat_train)
+n_true <- sum(docvars(dfmat_train, "negative") == 1)
+n_false <- sum(docvars(dfmat_train, "negative") == 0)
+
+# Inverse-frequency weights
+w_true <- n_total / (2 * n_true)   # weight for the negative class
+w_false <- n_total / (2 * n_false)   # weight for the negative class
+
+# Assign weights to each document
+weights <- ifelse(docvars(dfmat_train, "negative") == 1, w_true, w_false)
+
+# Fit cross-validated LASSO logistic regression
+cv_weight <- cv.glmnet(
+  dfmat_train,
+  docvars(dfmat_train, "negative"),
+  family = "binomial",
+  alpha = 1,
+  type.measure = "class",
+  weights = weights
+)
+
+plot(
+  log(cv_weight$lambda), cv_weight$cvm,
+  xlab = "Log Lambda",
+  ylab = "Misclassification error"
+)
+
+#### Converting continous float pred to dummy/binary pred
+# 1. Get predicted probabilities
+predict.prob <- predict(cv_weight, dfmat_val,
+                        type = "response",
+                        s = "lambda.min")
+
+# 2. Convert probabilities to class labels (threshold = 0.5)
+predict.class <- ifelse(predict.prob >= 0.5, "1", "0")
+
+# 3. Convert truth labels to factor with matching levels
+truth <- factor(docvars(dfmat_val, "negative"), levels = c("0","1"))
+pred  <- factor(predict.class, levels = c("0","1"))
+
+#matrix
+tab_val <- table(truth, pred)
+tab_val
+
+#Confusion matrix
+conf_matrix <- confusionMatrix(factor(predict.class), 
+                               factor(docvars(dfmat_val, "negative")),
+                               mode="prec_recall", positive="1")
+print(conf_matrix)
+```
+
+## Final Predictions
+
+```{r}
+#Let's apply this later model to the whole dataset:
+best_model <- tmod_nb #insert model name here
+
+combined$predict.negative <- as.numeric(predict(best_model, dfm)) - 1
+
+#Here is the prediction of negative for the whole corpus
+prop.table(table(combined$predict.negative))
+
+#We are probably over-predicting negative a little
+prop.table(table(combined$negative))
+```
+
+## Usefull \~ Negative
+
+```{r}
+combined = combined %>% 
+  mutate(review_len = nchar(text))
+```
+
+```{r}
+combined$log_useful <- log1p(combined$useful)
+
+model_simple <- lm(log_useful ~ predict.negative + review_len, data = combined)
+summary(model_simple)
+```
+
+```{r}
+combined$binary_useful <- ifelse(combined$log_useful > mean(combined$log_useful), 1, 0)
+```
+
+```{r}
+combined %>% 
+  ggplot(aes(x = log_useful)) +
+  geom_histogram()
+
+summary(combined$log_useful)
+```
+
+```{r}
+combined %>%
+  group_by(predict.negative) %>%
+  summarise(useful_prop = mean(binary_useful == 1))
+```
+
+## The End

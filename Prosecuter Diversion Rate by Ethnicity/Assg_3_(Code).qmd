@@ -1,0 +1,189 @@
+---
+title: "ECON185_Assignment3_(Code)"
+format: html
+editor: visual
+---
+
+## Packages and Data Cleaning
+
+```{r}
+#install.packages("readxl") 
+#install.packages('XLConnect')
+#install.packages("janitor")
+#install.packages("toOrdinal")
+
+library(toOrdinal)
+library(janitor)
+library(XLConnect)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+library(ggplot2)
+
+setwd("C:/Users/ariel/Downloads/UCSD/WI 26/ECON 185/Assignment_3")
+```
+
+```{r}
+# importing required packages
+multiplesheets <- function(fname) {
+ 
+  # getting info about all excel sheets
+  sheets <- readxl::excel_sheets(fname)
+  tibble <- lapply(sheets, function(x) readxl::read_excel(fname, sheet = x))
+  data_frame <- lapply(tibble, as.data.frame)
+  
+  # assigning names to data frames
+  names(data_frame) <- sheets
+  
+  # print data frame
+  print(data_frame)
+}
+```
+
+```{r}
+path <- '2016-Defendant-Information.xlsx'
+df_def <- multiplesheets(path)
+df_def <- df_def[["Data"]]
+
+colnames(df_def) <- tolower(colnames(df_def))
+
+df_def <- df_def[c("defendant number", "race", "gender")]
+```
+
+```{r}
+path <- "2016-Diversions.xlsx"
+df_div <- multiplesheets(path)
+df_div <- df_div[["Data"]]
+
+colnames(df_div) <- tolower(colnames(df_div))
+
+df_div <- df_div[c("defendant number", "program")]
+```
+
+```{r}
+path <- "2016-Charges-Filed.xlsx"
+df_cha <- multiplesheets(path)
+df_cha <- df_cha[["Data"]]
+
+colnames(df_cha) <- tolower(colnames(df_cha))
+
+df_cha <- df_cha[c("case id number", "defendant number", "crime type")]
+```
+
+```{r}
+# FIX MERGING ISSUES WHY ARE THERE MULTIPLES OF CASEID
+# inner or left or right join?
+
+#defendant number unique in case, defendant, 
+
+#merging dataset
+df <- df_cha %>%
+  # if we do not have race for a def, exclude them
+  right_join(df_def, by = "defendant number")%>% 
+  # there are def who have been diverted multiple times
+  # df_div does not connect case/offense to particular diversion
+  full_join(df_div, by = "defendant number", relationship = "many-to-many")
+```
+
+```{r}
+sum((is.na(df)))
+```
+
+```{r}
+# df_def is all unique rows
+length(unique(df_def$`defendant number`))
+
+# df_div is NOT all unique rows (unique=7495, rows=7811)
+length(unique(df_div$`defendant number`))
+
+# df_cha is NOT all unique (unique=79453, rows=165863)
+length(unique(df_cha$`defendant number`))
+# df_cha is NOT all unique (unique=73951, rows=165863)
+# length(unique(df_cha$`case id number`))
+```
+
+```{r}
+df_div %>% 
+  group_by("defendant number") %>% 
+  summarise(unique_def = length(unique(`defendant number`)))
+```
+
+```{r}
+table(df$race)
+```
+
+```{r}
+table(df$program)
+```
+
+```{r}
+# make dummy variable for diversion program
+# make ordinal case/charge severity
+
+
+df = df %>% 
+  mutate(diversion_dummy = ifelse(is.na(program), FALSE, TRUE))
+```
+
+```{r}
+df_2 = df[c("defendant number", "crime type", "race", "gender", "diversion_dummy")]
+
+# case yes
+# defendant no
+# crime type yes
+# race yes
+# gender yes
+# program yes (supposed to be)
+df %>% 
+  summarise(across(everything(), ~ sum(is.na(.x))))
+```
+
+```{r}
+df=na.omit(df_2)
+```
+
+```{r}
+df$`crime type` <- factor(df$`crime type`,
+                           ordered = TRUE,
+                           levels = c("Infraction","Misdemeanor","Felony"))
+```
+
+```{r}
+df %>% 
+  reframe(across(everything(), ~ class(.x)))
+```
+
+### Empirical Execution
+
+```{r}
+# control for race/ethnicity and gender
+# control for severity of case (booking charge or degree of the offense)
+
+mod = lm(data = df, diversion_dummy ~ race + gender + `crime type`)
+summary(mod)
+```
+
+```{r}
+mod_2 = glm(data = df, diversion_dummy ~ race + `crime type`, family = 'binomial')
+summary(mod_2)
+```
+
+```{r}
+# Log-odds (just the intercept)
+log_odds <- mod_2[["coefficients"]][["(Intercept)"]]
+log_odds
+```
+
+```{r}
+# Convert to probability
+p <- exp(log_odds) / (1 + exp(log_odds))
+p
+```
+
+```{r}
+my_coeff <- (mod_2[["coefficients"]][["(Intercept)"]]) + (mod_2[["coefficients"]][["raceVietnamese"]])
+
+
+p <- exp(my_coeff) / (1 + exp(my_coeff))
+p
+```
